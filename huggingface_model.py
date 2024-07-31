@@ -6,6 +6,13 @@ import torch.nn.functional as F
 import transformers
 from transformers import PreTrainedModel, PreTrainedTokenizer, AutoTokenizer
 
+from accelerate import (
+    Accelerator,
+    DistributedType,
+    InitProcessGroupKwargs,
+    find_executable_batch_size,
+)
+
 import copy
 
 from utils import (
@@ -16,6 +23,12 @@ from utils import (
     stop_sequences_criteria
 )
 
+from new_collator import IdentityCollator, get_batches
+
+import os
+import logging
+from packaging import version
+from datetime import timedelta
 from typing import List, Tuple, Union, Optional
 
 # from lm_eval/models/utils.py
@@ -25,6 +38,30 @@ def get_dtype(dtype: Union[str, torch.dtype]) -> torch.dtype:
     else:
         _torch_dtype = dtype
     return _torch_dtype
+
+def _get_accelerate_args(
+    device_map_option: Optional[str] = "auto",
+    max_memory_per_gpu: Optional[Union[int, str]] = None,
+    max_cpu_memory: Optional[Union[int, str]] = None,
+    offload_folder: Optional[str] = "./offload",
+    gpus: Optional[int] = None,
+) -> dict:
+    """Returns the kwargs needed to apply `accelerate` in `AutoModel.from_pretrained`."""
+    max_memory = {}
+    if max_memory_per_gpu is not None:
+        max_memory_per_gpu_map = {
+            device_idx: max_memory_per_gpu for device_idx in range(gpus)
+        }
+        max_memory.update(max_memory_per_gpu_map)
+    if max_cpu_memory is not None:
+        max_memory["cpu"] = max_cpu_memory
+
+    args = {}
+    if max_memory:
+        args["max_memory"] = max_memory
+    args["device_map"] = device_map_option
+    args["offload_folder"] = offload_folder
+    return args
 
 class HFLM(LM):
 
@@ -46,6 +83,11 @@ class HFLM(LM):
         prefix_token_id: Optional[int] = None,
         batch_size: Optional[Union[int,str]] = 1,
         max_batch_size: Optional[int] = 64,
+        parallelize: Optional[bool] = False,
+        device_map_option: Optional[str] = "auto",
+        max_memory_per_gpu: Optional[Union[int, str]] = None,
+        max_cpu_memory: Optional[Union[int, str]] = None,
+        offload_folder: Optional[Union[str, os.PathLike]] = "./offload",
         **kwargs,                 
     ) -> None:
         super().__init__()
@@ -53,6 +95,7 @@ class HFLM(LM):
         if not isinstance(model, str):
             self._model = model
             self._device = model.device
+            gpus = 0
 
             if tokenizer is not None:
                 self.tokenizer = tokenizer
@@ -64,10 +107,49 @@ class HFLM(LM):
         else:
             assert isinstance(device, str)
             assert isinstance(model, str)
+            assert isinstance(batch_size, (int, str))
 
-            # most of the rest of this branch in lm-evaluation-harness is for setting 
-            # up accelerate. TODO later.
+            gpus = torch.cuda.device_count()
+            accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(weeks=52))
+            accelerator = Accelerator(kwargs_handlers=[accelerator_kwargs])
+            if accelerator.num_processes > 1:
+                self.accelerator = accelerator
 
+            if "npu" in accelerator.device.type:
+                gpus = torch.npu.device_count()
+
+            if not (parallelize or accelerator.num_processes > 1):
+                device_list = set(
+                    ["cuda", "cpu"]
+                    + [f"cuda:{i}" for i in range(gpus)]
+                    + ["mps", "mps:0"]
+                    + [f"npu:{i}" for i in range(gpus)]
+                )
+                if device and device in device_list:
+                    self._device = torch.device(device)
+                    logging.info(f"Using device '{device}'")
+                    if device in ("mps", "mps:0") and version.parse(
+                        torch.__version__
+                    ) < version.parse("2.1"):
+                        raise RuntimeError(
+                            f"mps requires torch >= 2.1. You have {torch.__version__}"
+                        )
+                else:
+                    logging.info("Device not specified")
+                    logging.info(f"Cuda Available? {torch.cuda.is_available()}")
+                    self._device = (
+                        torch.device("cuda")
+                        if torch.cuda.is_available()
+                        else torch.device("cpu")
+                    )
+            else:
+                if device != "cuda":
+                    logging.info(
+                        f"Using `accelerate launch` or `parallelize=True`, device '{device}' will be overridden when placing model."
+                    )
+                # TODO: include in warning that `load_in_8bit` etc. affect this too
+                self._device = torch.device(device)
+            
         self._device = device
         self._max_length = max_length
         self.add_bos_token = add_bos_token
@@ -139,14 +221,50 @@ class HFLM(LM):
         self,
         model: str,
         dtype: Optional[Union[str, torch.dtype]] = "auto",
+        trust_remote_code: Optional[bool] = False,
+        parallelize: Optional[bool] = False,
+        gpus: Optional[int] = None,
+        device_map_option: Optional[str] = "auto",
+        max_memory_per_gpu: Optional[Union[int, str]] = None,
+        max_cpu_memory: Optional[Union[int, str]] = None,
+        offload_folder: Optional[str] = "./offload",
         device: str = "auto",
         **kwargs
     ) -> None:
+        
         model_kwargs = kwargs if kwargs else {}
+
+        if parallelize:
+            model_kwargs.update(
+                _get_accelerate_args(
+                    device_map_option,
+                    max_memory_per_gpu,
+                    max_cpu_memory,
+                    offload_folder,
+                    gpus
+                )
+            )
+        elif "device_map" not in model_kwargs:
+            if hasattr(self, "accelerator"):
+                model_kwargs.update({"device_map": {"": f"{self.accelerator.device}"}})
+            else:
+                model_kwargs.update({"device_map": {"": str(self.device)}})
+
+        if model_kwargs.get("load_in_4bit", None):
+            assert (
+                transformers.__version__ >= "4.30.0"
+            ), "load_in_4bit requires transformers >= 4.30.0"
+        if transformers.__version__ >= "4.30.0":
+            if model_kwargs.get("load_in_4bit", None):
+                if model_kwargs.get("bnb_4bit_compute_dtype", None):
+                    model_kwargs["bnb_4bit_compute_dtype"] = get_dtype(
+                        model_kwargs["bnb_4bit_compute_dtype"]
+                    )
 
         self._model = self.AUTO_MODEL_CLASS.from_pretrained(
             model,
             torch_dtype=get_dtype(dtype),
+            trust_remote_code=trust_remote_code,
             **model_kwargs
         )
 
@@ -154,7 +272,10 @@ class HFLM(LM):
 
     @property
     def model(self):
-        return self._model
+        if hasattr(self, "accelerator"):
+            return self.accelerator.unwrap_model(self._model)
+        else:
+            return self._model
     
     @property
     def max_length(self):
@@ -253,35 +374,8 @@ class HFLM(LM):
     def _loglikelihood_tokens(self, requests) -> List[float]:
         res = []
 
-        def _collate(req: Tuple[Tuple[str, str], List[int], List[int]]):
-            """Defines the key for the sorted method"""
-            # the negative sign on len(toks) sorts descending - this has a few advantages:
-            # - time estimates will always be over not underestimates, which is more useful for planning
-            # - to know the size of a batch when going through the list, you know the first one is always the batch
-            #   padded context length. this is useful to simplify the batching logic and more importantly to make
-            #   automatic adaptive batches much much easier to implement
-            # - any OOMs will happen right away rather than near the end
-
-            toks = req[1] + req[2]
-            return -len(toks), tuple(toks)
-
-        def _lookup_one_token_cont(req: Tuple[Tuple[str, str], List[int], List[int]]):
-            """Defines the key to group and lookup one-token continuations"""
-            # Use with group_by="contexts" (optional)"
-            # allows for the creation of a lookup, so we can reuse logits in case of one-token continuations.
-            # speeds up some multiple-choice tasks proportionally to the number of choices.
-            # groups requests by context+continuation[:-1] and infer on one request/group.
-            return req[-2] + req[-1][:-1]
-
-        re_ord = Collator(
-            requests,
-            sort_fn=_collate,
-            group_by="contexts",
-            group_fn=_lookup_one_token_cont,
-        )
-
         batch_size = self.batch_size
-        chunks = re_ord.get_batched(n=batch_size, batch_fn=None)
+        chunks = get_batches(requests, n=batch_size)
 
         for chunk in chunks:
             inps = []
@@ -336,21 +430,15 @@ class HFLM(LM):
 
                     greedy_tokens = logits.argmax(dim=-1)
 
-                    for request_str, cont_toks, logits in re_ord.get_cache(
-                        req_str=request_str,
-                        cxt_toks=ctx_tokens,
-                        cont_toks=cont_toks,
-                        logits=logits,
-                    ):
-                        cont_toks = torch.tensor(cont_toks, dtype=torch.long, device=self.device).unsqueeze(0)
-                        max_equal = (greedy_tokens == cont_toks).all()
-                        
-                        logits = torch.gather(logits, 2, cont_toks.unsqueeze(-1)).squeeze(-1)
+                    cont_toks = torch.tensor(cont_toks, dtype=torch.long, device=self.device).unsqueeze(0)
+                    max_equal = (greedy_tokens == cont_toks).all()
+                    
+                    logits = torch.gather(logits, 2, cont_toks.unsqueeze(-1)).squeeze(-1)
 
-                        answer = (float(logits.sum()), bool(max_equal))
-                        res.append(answer)
+                    answer = (float(logits.sum()), bool(max_equal))
+                    res.append(answer)
 
-        return re_ord.get_original(res)
+        return res
             
     def loglikelihood_rolling(self, requests : List[str]) -> List[Tuple[float]]:
         '''
@@ -452,27 +540,9 @@ class HFLM(LM):
     def generate_until(self, requests) -> List[str]:
         res = []
 
-        def _collate(req: Tuple[str, dict]):
-            """Defines the key for the sorted method"""
-            # the negative sign on len(toks) sorts descending - this has a few advantages:
-            # - time estimates will always be over not underestimates, which is more useful for planning
-            # - to know the size of a batch when going through the list, you know the first one is always the batch
-            #   padded context length. this is useful to simplify the batching logic and more importantly to make
-            #   automatic adaptive batches much much easier to implement
-            # - any OOMs will happen right away rather than near the end
-            toks = self.tok_encode(req[0])
-            return -len(toks), req[0]
-
         batch_size = self.batch_size
 
-        re_ords = Collator(
-            requests,
-            sort_fn=_collate,
-            group_by="gen_kwargs",
-            group_fn=lambda x: x[1],
-        )
-
-        chunks = re_ords.get_batched(n=batch_size, batch_fn=None)
+        chunks = get_batches(requests, n=batch_size)
         for chunk in chunks:
             contexts, all_gen_kwargs = zip(*chunk)
             gen_kwargs = all_gen_kwargs[0]
@@ -537,5 +607,4 @@ class HFLM(LM):
                         s = s.split(term)[0]
 
                 res.append(s)
-        res = re_ords.get_original(res)
         return res
