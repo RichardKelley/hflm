@@ -19,6 +19,7 @@ from utils import (
     get_rolling_token_windows,
     make_disjoint_window,
     Collator,
+    configure_pad_token,
     pad_and_concat,
     stop_sequences_criteria
 )
@@ -169,6 +170,9 @@ class HFLM(LM):
         # create model
         if isinstance(model, str):
             self._create_model(model, dtype=dtype, device=device, **kwargs)
+
+        self.tokenizer = configure_pad_token(self.tokenizer)
+
 
     def _get_backend(
         self,

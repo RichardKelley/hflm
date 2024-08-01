@@ -21,6 +21,29 @@ import collections
 
 import transformers
 
+def configure_pad_token(tokenizer):
+    if tokenizer.pad_token is not None:
+        pass
+    elif tokenizer.unk_token:
+        tokenizer.pad_token_id = tokenizer.unk_token_id
+    elif tokenizer.eos_token:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    else:
+        if (
+            tokenizer.__class__.__name__ == "RWKVWorldTokenizer"
+            or tokenizer.__class__.__name__ == "Rwkv5Tokenizer"
+        ):
+            # The RWKV world tokenizer, does not allow for adding special tokens / setting the pad token (which is set as 0)
+            # The additional tokenizer name check is needed, as there exists rwkv4 models with neox tokenizer
+            # ---
+            # Note that the world tokenizer class name, might change in the future for the final huggingface merge
+            # https://github.com/huggingface/transformers/pull/26963
+            assert tokenizer.pad_token_id == 0
+        else:
+            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+
+    return tokenizer
+
 def get_rolling_token_windows(token_list, prefix_token, max_seq_len, context_len):
     """
     - context_len allows for a rolling window context, allowing each prediction window to potentially
