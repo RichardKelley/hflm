@@ -21,6 +21,17 @@ import collections
 
 import transformers
 
+def get_batches(in_arr: List, n: int = 1):
+    arr = []
+    for i, x in enumerate(in_arr):
+        arr.append(x)
+        if len(arr) == n:
+            yield arr
+            arr = []
+
+    if arr:
+        yield arr
+
 def configure_pad_token(tokenizer):
     if tokenizer.pad_token is not None:
         pass

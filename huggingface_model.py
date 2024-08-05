@@ -20,10 +20,9 @@ from utils import (
     make_disjoint_window,
     configure_pad_token,
     pad_and_concat,
-    stop_sequences_criteria
+    stop_sequences_criteria,
+    get_batches
 )
-
-from new_collator import IdentityCollator, get_batches
 
 import os
 import logging
