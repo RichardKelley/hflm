@@ -18,7 +18,6 @@ import copy
 from utils import (
     get_rolling_token_windows,
     make_disjoint_window,
-    Collator,
     configure_pad_token,
     pad_and_concat,
     stop_sequences_criteria
