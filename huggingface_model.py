@@ -414,33 +414,33 @@ class HFLM(LM):
                 cont_toks_list.append(continuation_enc)
                 inplens.append(inplen)
 
-                call_kwargs = {}
+            call_kwargs = {}
 
-                batched_inps = pad_and_concat(
-                    padding_len_inp, inps, padding_side="right"
-                )
+            batched_inps = pad_and_concat(
+                padding_len_inp, inps, padding_side="right"
+            )
 
-                multi_logits = F.log_softmax(
-                    self._model_call(batched_inps, **call_kwargs), dim=-1
-                )
+            multi_logits = F.log_softmax(
+                self._model_call(batched_inps, **call_kwargs), dim=-1
+            )
 
-                for (request_str, ctx_tokens, _), logits, inplen, cont_toks in zip(
-                    chunk, multi_logits, inplens, cont_toks_list
-                ):
-                    contlen = len(cont_toks)
-                    ctx_len = inplen + (logits.shape[0] - padding_len_inp)
-                    logits = self._select_cont_toks(logits, contlen=contlen, inplen=ctx_len)
-                    logits = logits.unsqueeze(0) 
+            for (request_str, ctx_tokens, _), logits, inplen, cont_toks in zip(
+                chunk, multi_logits, inplens, cont_toks_list
+            ):
+                contlen = len(cont_toks)
+                ctx_len = inplen + (logits.shape[0] - padding_len_inp)
+                logits = self._select_cont_toks(logits, contlen=contlen, inplen=ctx_len)
+                logits = logits.unsqueeze(0) 
 
-                    greedy_tokens = logits.argmax(dim=-1)
+                greedy_tokens = logits.argmax(dim=-1)
 
-                    cont_toks = torch.tensor(cont_toks, dtype=torch.long, device=self.device).unsqueeze(0)
-                    max_equal = (greedy_tokens == cont_toks).all()
-                    
-                    logits = torch.gather(logits, 2, cont_toks.unsqueeze(-1)).squeeze(-1)
+                cont_toks = torch.tensor(cont_toks, dtype=torch.long, device=self.device).unsqueeze(0)
+                max_equal = (greedy_tokens == cont_toks).all()
+                
+                logits = torch.gather(logits, 2, cont_toks.unsqueeze(-1)).squeeze(-1)
 
-                    answer = (float(logits.sum()), bool(max_equal))
-                    res.append(answer)
+                answer = (float(logits.sum()), bool(max_equal))
+                res.append(answer)
 
         return res
             
