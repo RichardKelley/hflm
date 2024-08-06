@@ -12,6 +12,7 @@ from accelerate import (
     InitProcessGroupKwargs,
     find_executable_batch_size,
 )
+from accelerate.utils import get_max_memory
 
 import copy
 
@@ -39,30 +40,6 @@ def get_dtype(dtype: Union[str, torch.dtype]) -> torch.dtype:
     else:
         _torch_dtype = dtype
     return _torch_dtype
-
-def _get_accelerate_args(
-    device_map_option: Optional[str] = "auto",
-    max_memory_per_gpu: Optional[Union[int, str]] = None,
-    max_cpu_memory: Optional[Union[int, str]] = None,
-    offload_folder: Optional[str] = "./offload",
-    gpus: Optional[int] = None,
-) -> dict:
-    """Returns the kwargs needed to apply `accelerate` in `AutoModel.from_pretrained`."""
-    max_memory = {}
-    if max_memory_per_gpu is not None:
-        max_memory_per_gpu_map = {
-            device_idx: max_memory_per_gpu for device_idx in range(gpus)
-        }
-        max_memory.update(max_memory_per_gpu_map)
-    if max_cpu_memory is not None:
-        max_memory["cpu"] = max_cpu_memory
-
-    args = {}
-    if max_memory:
-        args["max_memory"] = max_memory
-    args["device_map"] = device_map_option
-    args["offload_folder"] = offload_folder
-    return args
 
 class HFLM(LM):
 
@@ -174,6 +151,143 @@ class HFLM(LM):
         self.tokenizer = configure_pad_token(self.tokenizer)
 
 
+        if isinstance(model, str):
+            if gpus >= 1 or str(self.device) == "mps":
+                # TODO: can remove this whole snippet except in the mps case, perhaps?
+                if not (parallelize or hasattr(self, "accelerator")):
+                    # place model onto device requested manually,
+                    # if not using HF Accelerate or device_map
+                    # or any other option that preloads model onto device
+                    try:
+                        self._model.to(self.device)
+                    except ValueError:
+                        logging.debug(
+                            "Failed to place model onto specified device. This may be because the model is quantized via `bitsandbytes` or `device_map` is provided. If the desired GPU is being used, this message is safe to ignore."
+                        )
+            # multigpu data-parallel support when launched with accelerate
+            if gpus > 1:
+                if accelerator.num_processes > 1:
+                    if parallelize:
+                        logging.warning(
+                            "You are both using a HF Accelerate `device_map` (`--model_args parallelize=True`) and launching via `accelerate launch`. This will attempt to do model and data parallelism depending on the resources available."
+                        )
+                    elif gpus > accelerator.num_processes:
+                        logging.warning(
+                            "WARNING: The number of total system GPUs does not match the number of spawned processes. "
+                            "If you would like to use data parallelism, please launch the script "
+                            "with 'accelerate launch *script*'. "
+                            f"Current run will proceed with {accelerator.num_processes} devices."
+                        )
+                        if self.accelerator.is_local_main_process:
+                            logging.info(
+                                f"Using {gpus} devices with data parallelism"
+                            )
+
+                    self._device = torch.device(f"{accelerator.device}")
+                    self.accelerator = accelerator
+
+                    self._rank = self.accelerator.local_process_index
+                    self._world_size = self.accelerator.num_processes
+                else:
+                    # if we aren't launching via accelerate, ditch
+                    self._rank = 0
+                    self._world_size = 1
+        else:
+            # if a PreTrainedModel was passed into HFLM, we forgo distributed setup.
+            logging.warning(
+                "Passed an already-initialized model through `pretrained`, assuming single-process call to evaluate() or custom distributed integration"
+            )
+            self._rank = 0
+            self._world_size = 1
+
+
+    def _get_accelerate_args(self,
+        parallelize: bool = None,
+        device_map: Optional[str] = "auto",
+        max_memory_per_gpu: Optional[Union[int, str]] = None,
+        max_cpu_memory: Optional[Union[int, str]] = None,
+        offload_folder: Optional[str] = "./offload",
+        gpus: Optional[int] = None,
+    ) -> dict:
+        """Returns the kwargs needed to apply `accelerate` in `AutoModel.from_pretrained`."""
+        num_local_processes = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
+        num_machines = int(os.environ.get("WORLD_SIZE", 0)) // num_local_processes
+        if (
+            num_machines == 0
+            and hasattr(self, "accelerator")
+            and self.accelerator is not None
+        ):
+            logging.info(
+                "We are not in a distributed setting for accelerate. Setting model_parallel to False."
+            )
+            parallelize = False
+
+        if parallelize is None:
+            # If parallelism is unset by the user, we automatically assign model parallelism
+            # if enough extra GPUs are available
+            max_memory_all_gpus = get_max_memory()
+            # We just want gpu, not cpu, max memory
+            if "cpu" in max_memory_all_gpus:
+                del max_memory_all_gpus["cpu"]
+            parallelize = bool(num_local_processes < len(max_memory_all_gpus))
+            logging.info(
+                f"Setting model parallel to {parallelize} since "
+                f"the number of local processes is {num_local_processes} "
+                f"and the number of GPUs is {len(max_memory_all_gpus)}"
+            )
+
+        args = {}
+        if parallelize:  # Model parallelism will be used
+            max_memory = {}
+            if max_memory_per_gpu is not None:  # Using the provided memory requirements
+                max_memory_per_gpu_map = {
+                    device_idx: max_memory_per_gpu for device_idx in range(gpus)
+                }
+            else:  # Estimating the possible memory requirements
+                max_memory_all_gpus = get_max_memory()
+                if "cpu" in max_memory_all_gpus:
+                    del max_memory_all_gpus["cpu"]
+                if not hasattr(self, "accelerator"):
+                    max_memory_per_gpu_map = {
+                        k: v for k, v in max_memory_all_gpus.items()
+                    }
+                else:
+                    # use only 1 / num_processes of the GPUs if we are running under accelerate launch
+                    max_memory_per_gpu_map = {
+                        k: v
+                        for k, v in max_memory_all_gpus.items()
+                        if k % num_local_processes
+                        == (self.accelerator.process_index % num_local_processes)
+                    }
+            args["max_memory"] = max_memory_per_gpu_map
+            args["device_map"] = "auto"
+            logging.info(
+                f"Model parallel was set to True, setting max memory per GPU to {max_memory_per_gpu_map} and device map to 'auto'"
+            )
+
+            if max_cpu_memory is not None:
+                max_memory["cpu"] = max_cpu_memory
+
+            args["offload_folder"] = offload_folder
+        elif (
+            device_map is None
+        ):  # No model parallelism, we use the default provided device for our model
+            if hasattr(self, "accelerator"):
+                device_map = {"": f"{self.accelerator.device}"}
+            else:
+                device_map = {"": str(self.device)}
+            args["max_memory"] = None
+            args["device_map"] = device_map
+            logging.info(
+                f"Model parallel was set to False, max memory was not set, and device map was set to {device_map}"
+            )
+        else:
+            args["max_memory"] = None
+            args["device_map"] = None
+            logging.info("Model parallel was set to False.")
+
+        return args
+
     def _get_backend(
         self,
         backend = "default",
@@ -238,17 +352,17 @@ class HFLM(LM):
         
         model_kwargs = kwargs if kwargs else {}
 
-        if parallelize:
-            model_kwargs.update(
-                _get_accelerate_args(
-                    device_map_option,
-                    max_memory_per_gpu,
-                    max_cpu_memory,
-                    offload_folder,
-                    gpus
-                )
+        model_kwargs.update(
+            self._get_accelerate_args(
+                parallelize,
+                kwargs.get("device_map", None),
+                max_memory_per_gpu,
+                max_cpu_memory,
+                offload_folder,
+                gpus
             )
-        elif "device_map" not in model_kwargs:
+        )
+        if "device_map" not in model_kwargs:
             if hasattr(self, "accelerator"):
                 model_kwargs.update({"device_map": {"": f"{self.accelerator.device}"}})
             else:
