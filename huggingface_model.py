@@ -24,6 +24,8 @@ from utils import (
     get_batches
 )
 
+from tqdm import tqdm
+
 import os
 import logging
 from packaging import version
@@ -344,7 +346,7 @@ class HFLM(LM):
 
         return context_enc, continuation_enc
 
-    def loglikelihood(self, requests: List[Tuple[str,str]]) -> List[Tuple[float, bool]]:
+    def loglikelihood(self, requests: List[Tuple[str,str]], disable_tqdm: bool = False) -> List[Tuple[float, bool]]:
         '''
         requests is a list of (context, continuation) pairs
         '''
@@ -373,12 +375,17 @@ class HFLM(LM):
 
         return logits
 
-    def _loglikelihood_tokens(self, requests) -> List[float]:
+    def _loglikelihood_tokens(self, requests, disable_tqdm : bool = False) -> List[float]:
         res = []
 
         batch_size = self.batch_size
         chunks = get_batches(requests, n=batch_size)
 
+        pbar = tqdm(
+            total=len(requests),
+            disable=disable_tqdm,
+            desc="Running loglikelihood requests",
+        )
         for chunk in chunks:
             inps = []
             cont_toks_list = []
@@ -439,16 +446,17 @@ class HFLM(LM):
 
                 answer = (float(logits.sum()), bool(max_equal))
                 res.append(answer)
+                pbar.update(1)
 
         return res
             
-    def loglikelihood_rolling(self, requests : List[str]) -> List[Tuple[float]]:
+    def loglikelihood_rolling(self, requests : List[str], disable_tqdm : bool = False) -> List[Tuple[float]]:
         '''
         We will assume that `requests` has type List[str] for this implementation
         '''
         loglikelihoods = []
 
-        for req in requests:
+        for req in tqdm(requests, disable=disable_tqdm):
             string = req
             rolling_token_windows = list(
                 map(
@@ -465,7 +473,8 @@ class HFLM(LM):
             rolling_token_windows = [(None,) + x for x in rolling_token_windows]
 
             string_nll = self._loglikelihood_tokens(
-                rolling_token_windows
+                rolling_token_windows,
+                disable_tqdm=True
             )
 
             string_nll = [x[0] for x in string_nll]
@@ -539,8 +548,14 @@ class HFLM(LM):
             **generation_kwargs
         )
 
-    def generate_until(self, requests) -> List[str]:
+    def generate_until(self, requests, disable_tqdm : bool = False) -> List[str]:
         res = []
+
+        pbar = tqdm(
+            total=len(requests),
+            disable=disable_tqdm,
+            desc="Running generate_until requests",
+        )
 
         batch_size = self.batch_size
 
@@ -609,4 +624,5 @@ class HFLM(LM):
                         s = s.split(term)[0]
 
                 res.append(s)
+                pbar.update(1)
         return res
