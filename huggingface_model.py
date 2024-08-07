@@ -146,7 +146,7 @@ class HFLM(LM):
 
         # create model
         if isinstance(model, str):
-            self._create_model(model, dtype=dtype, device=device, **kwargs)
+            self._create_model(model, dtype=dtype, device=device, parallelize=parallelize, **kwargs)
 
         self.tokenizer = configure_pad_token(self.tokenizer)
 
