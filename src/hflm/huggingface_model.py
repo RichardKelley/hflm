@@ -1,4 +1,4 @@
-from model import LM
+from .model import LM
 
 import torch
 import torch.nn.functional as F
@@ -16,7 +16,7 @@ from accelerate.utils import get_max_memory
 
 import copy
 
-from utils import (
+from .utils import (
     get_rolling_token_windows,
     make_disjoint_window,
     configure_pad_token,
