@@ -537,6 +537,14 @@ class HFLM(LM):
         requests is a list of (context, continuation) pairs
         '''
         new_reqs = []
+
+        adaptive_batch_size = None
+        if self.batch_size == "auto":
+            print("Passed batch size auto. Detecting largest batch size.")
+            batch_size = self._detect_batch_size()
+            print(f"Determined largest batch size: {batch_size}.")
+            adaptive_batch_size = batch_size
+
         for context, continuation in requests:
             if context == '':
                 context_enc, continuation_enc = (
@@ -548,7 +556,7 @@ class HFLM(LM):
 
             new_reqs.append(((context, continuation), context_enc, continuation_enc))
 
-        return self._loglikelihood_tokens(new_reqs)
+        return self._loglikelihood_tokens(new_reqs, override_bs=adaptive_batch_size)
 
     def _model_call(self, inps, attn_mask=None, labels=None):
         with torch.no_grad():
@@ -752,13 +760,26 @@ class HFLM(LM):
     def generate_until(self, requests, disable_tqdm : bool = False) -> List[str]:
         res = []
 
+        adaptive_batch_size = None
+        if self.batch_size == "auto":
+            print("Passed batch size auto. Detecting largest batch size.")
+            batch_size = self._detect_batch_size()
+            print(f"Determined largest batch size: {batch_size}.")
+            adaptive_batch_size = batch_size
+
+        batch_size = (
+            self.batch_size
+            if self.batch_size != "auto"
+            else adaptive_batch_size
+            if adaptive_batch_size is not None
+            else 0
+        )
+
         pbar = tqdm(
             total=len(requests),
             disable=disable_tqdm,
             desc="Running generate_until requests",
         )
-
-        batch_size = self.batch_size
 
         chunks = get_batches(requests, n=batch_size)
         for chunk in chunks:
