@@ -44,5 +44,5 @@ addopts = [
 Homepage = "https://github.com/RichardKelley/hflm"
 
 [project.scripts]
-lmprob = "hflm.lmprob.__main__:lm_prob"
-lmgen = "hflm.lmgen.__main__:lm_gen"
+lmprob = "hflm.lm_prob.__main__:lm_prob"
+lmgen = "hflm.lm_gen.__main__:lm_gen"
