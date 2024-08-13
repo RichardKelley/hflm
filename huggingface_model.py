@@ -33,6 +33,8 @@ from packaging import version
 from datetime import timedelta
 from typing import List, Tuple, Union, Optional
 
+import gc
+
 # from lm_eval/models/utils.py
 def get_dtype(dtype: Union[str, torch.dtype]) -> torch.dtype:
     if isinstance(dtype, str) and dtype != "auto":
@@ -60,7 +62,7 @@ class HFLM(LM):
         max_length: Optional[int] = None,
         prefix_token_id: Optional[int] = None,
         batch_size: Optional[Union[int,str]] = 1,
-        max_batch_size: Optional[int] = 64,
+        max_batch_size: Optional[int] = 1024,
         parallelize: Optional[bool] = False,
         max_memory_per_gpu: Optional[Union[int, str]] = None,
         max_cpu_memory: Optional[Union[int, str]] = None,
@@ -127,12 +129,21 @@ class HFLM(LM):
                 # TODO: include in warning that `load_in_8bit` etc. affect this too
                 self._device = torch.device(device)
             
+        self.truncation = truncation
         self._device = device
         self._max_length = max_length
         self.add_bos_token = add_bos_token
         self.custom_prefix_token_id = prefix_token_id
-        self.batch_size_per_gpu = batch_size
-        self.truncation = truncation
+        
+        self.batch_sizes = {}
+        self.max_batch_size = max_batch_size
+
+        if str(batch_size).startswith("auto"):
+            batch_size = batch_size.split(":")
+            self.batch_size_per_gpu = batch_size[0]
+            #self.batch_schedule = float(batch_size[1]) if len(batch_size) > 1 else 1
+        else:
+            self.batch_size_per_gpu = int(batch_size)
 
         # get backend
         self._get_backend()
@@ -418,6 +429,69 @@ class HFLM(LM):
     @property
     def device(self):
         return self._device
+    
+    @property
+    def world_size(self):
+        return self._world_size
+    
+    def _detect_batch_size(self, requests=None, pos: int = 0):
+        if requests:
+            context_enc, continuation_enc = requests[pos]
+            max_length = len(
+                (context_enc + continuation_enc)[-(self.max_length + 1) : ][:-1]
+            )
+            max_context_enc = len(context_enc[-(self.max_length + 1) :])
+            max_cont_enc = len(continuation_enc[-(self.max_length + 1 ) :])
+        else:
+            max_length = self.max_length
+            max_context_enc = max_length
+            max_cont_enc = max_length
+
+        # if OOM, halve batch size and retry.
+        @find_executable_batch_size(starting_batch_size=self.max_batch_size)
+        def forward_batch(batch_size):
+            if self.AUTO_MODEL_CLASS == transformers.AutoModelForSeq2SeqLM:
+                length = max(max_context_enc, max_cont_enc)
+                batched_conts = torch.ones(
+                    (batch_size, length), device=self.device
+                ).long()
+                test_batch = torch.ones((batch_size, length), device=self.device).long()
+                call_kwargs = {
+                    "attn_mask": test_batch,
+                    "labels": batched_conts,
+                }
+            else:
+                call_kwargs = {}
+                test_batch = torch.ones(
+                    (batch_size, max_length), device=self.device
+                ).long()
+            for _ in range(5):
+                out = F.log_softmax(self._model_call(test_batch, **call_kwargs), dim=-1)  # noqa: F841
+
+            return batch_size
+
+        try:
+            batch_size = forward_batch()
+        except RuntimeError as e:
+            if "No executable batch size found" in str(e):
+                batch_size = 1
+            else:
+                raise
+
+        if self.world_size > 1:
+            # if multi-GPU, always take minimum over all selected batch sizes
+            max_rnk_bs = torch.tensor([batch_size], device=self.device)
+            gathered = (
+                self.accelerator.gather(max_rnk_bs).cpu().detach().numpy().tolist()
+            )
+            batch_size = min(gathered)
+            gc.collect()
+            torch.cuda.empty_cache()
+            return batch_size
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        return batch_size
 
     def tok_encode(self, string: str, left_truncate_len=None, add_special_tokens=None):
         special_tokens_kwargs = {}
@@ -463,6 +537,14 @@ class HFLM(LM):
         requests is a list of (context, continuation) pairs
         '''
         new_reqs = []
+
+        adaptive_batch_size = None
+        if self.batch_size == "auto":
+            print("Passed batch size auto. Detecting largest batch size.")
+            batch_size = self._detect_batch_size(requests=requests)
+            print(f"Determined largest batch size: {batch_size}.")
+            adaptive_batch_size = batch_size
+
         for context, continuation in requests:
             if context == '':
                 context_enc, continuation_enc = (
@@ -474,7 +556,7 @@ class HFLM(LM):
 
             new_reqs.append(((context, continuation), context_enc, continuation_enc))
 
-        return self._loglikelihood_tokens(new_reqs)
+        return self._loglikelihood_tokens(new_reqs, override_bs=adaptive_batch_size)
 
     def _model_call(self, inps, attn_mask=None, labels=None):
         with torch.no_grad():
@@ -487,10 +569,17 @@ class HFLM(LM):
 
         return logits
 
-    def _loglikelihood_tokens(self, requests, disable_tqdm : bool = False) -> List[float]:
+    def _loglikelihood_tokens(self, requests, disable_tqdm : bool = False, override_bs : int = None) -> List[float]:
         res = []
 
-        batch_size = self.batch_size
+        batch_size = (
+            self.batch_size
+            if self.batch_size != "auto"
+            else override_bs
+            if override_bs is not None
+            else 0
+        )
+        
         chunks = get_batches(requests, n=batch_size)
 
         pbar = tqdm(
@@ -568,6 +657,13 @@ class HFLM(LM):
         '''
         loglikelihoods = []
 
+        adaptive_batch_size = None
+        if self.batch_size == "auto":
+            print("Passed batch size auto. Detecting largest batch size.")
+            batch_size = self._detect_batch_size()
+            print(f"Determined largest batch size: {batch_size}.")
+            adaptive_batch_size = batch_size
+
         for req in tqdm(requests, disable=disable_tqdm):
             string = req
             rolling_token_windows = list(
@@ -586,7 +682,8 @@ class HFLM(LM):
 
             string_nll = self._loglikelihood_tokens(
                 rolling_token_windows,
-                disable_tqdm=True
+                disable_tqdm=True,
+                override_bs=adaptive_batch_size
             )
 
             string_nll = [x[0] for x in string_nll]
@@ -663,13 +760,26 @@ class HFLM(LM):
     def generate_until(self, requests, disable_tqdm : bool = False) -> List[str]:
         res = []
 
+        adaptive_batch_size = None
+        if self.batch_size == "auto":
+            print("Passed batch size auto. Detecting largest batch size.")
+            batch_size = self._detect_batch_size()
+            print(f"Determined largest batch size: {batch_size}.")
+            adaptive_batch_size = batch_size
+
+        batch_size = (
+            self.batch_size
+            if self.batch_size != "auto"
+            else adaptive_batch_size
+            if adaptive_batch_size is not None
+            else 0
+        )
+
         pbar = tqdm(
             total=len(requests),
             disable=disable_tqdm,
             desc="Running generate_until requests",
         )
-
-        batch_size = self.batch_size
 
         chunks = get_batches(requests, n=batch_size)
         for chunk in chunks:

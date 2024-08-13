@@ -21,7 +21,7 @@ import collections
 
 import transformers
 
-def get_batches(in_arr: List, n: int = 1):
+def get_batches(in_arr: List, n: int = 0):
     arr = []
     for i, x in enumerate(in_arr):
         arr.append(x)
