@@ -62,7 +62,7 @@ class HFLM(LM):
         max_length: Optional[int] = None,
         prefix_token_id: Optional[int] = None,
         batch_size: Optional[Union[int,str]] = 1,
-        max_batch_size: Optional[int] = 64,
+        max_batch_size: Optional[int] = 1024,
         parallelize: Optional[bool] = False,
         max_memory_per_gpu: Optional[Union[int, str]] = None,
         max_cpu_memory: Optional[Union[int, str]] = None,
@@ -436,9 +436,9 @@ class HFLM(LM):
     
     def _detect_batch_size(self, requests=None, pos: int = 0):
         if requests:
-            _, context_enc, continuation_enc = requests[pos]
+            context_enc, continuation_enc = requests[pos]
             max_length = len(
-                (context_enc + continuation_enc)[-(self.max_length + 1) : ][-1]
+                (context_enc + continuation_enc)[-(self.max_length + 1) : ][:-1]
             )
             max_context_enc = len(context_enc[-(self.max_length + 1) :])
             max_cont_enc = len(continuation_enc[-(self.max_length + 1 ) :])
@@ -541,7 +541,7 @@ class HFLM(LM):
         adaptive_batch_size = None
         if self.batch_size == "auto":
             print("Passed batch size auto. Detecting largest batch size.")
-            batch_size = self._detect_batch_size()
+            batch_size = self._detect_batch_size(requests=requests)
             print(f"Determined largest batch size: {batch_size}.")
             adaptive_batch_size = batch_size
 
