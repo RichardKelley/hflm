@@ -23,10 +23,16 @@ def lm_prob():
         logging.error("String required.")
         sys.exit(1)
 
+    if args.device == "cpu":
+        parallelize = False
+    else:
+        parallelize = True
+
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore')
-        model = HFLM(model=args.model, device=args.device)
+        model = HFLM(model=args.model, device=args.device, parallelize=parallelize)
         print(model.loglikelihood_rolling([args.string], disable_tqdm=True)[0])
 
 if __name__ == "__main__":
     lm_prob()
+
