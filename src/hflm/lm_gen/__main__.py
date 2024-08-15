@@ -28,9 +28,14 @@ def lm_gen():
         logging.error("String required.")
         sys.exit(1)
 
+    if args.device == "cpu":
+        parallelize = False
+    else:
+        parallelize = True
+
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore')
-        model = HFLM(model=args.model, device=args.device, parallelize=True)
+        model = HFLM(model=args.model, device=args.device, parallelize=parallelize)
 
         if args.temperature == 0.0: 
             do_sample = False
