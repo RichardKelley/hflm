@@ -5,7 +5,6 @@ import sys
 import warnings
 from transformers.utils import logging as hf_logging
 
-
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", "-m", type=str, help="")
