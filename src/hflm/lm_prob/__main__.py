@@ -3,6 +3,7 @@ from hflm.huggingface_model import HFLM
 import logging
 import sys
 import warnings
+from transformers.utils import logging as hf_logging
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -12,6 +13,7 @@ def setup_parser() -> argparse.ArgumentParser:
     return parser
 
 def lm_prob():
+    hf_logging.set_verbosity(hf_logging.ERROR)
     parser = setup_parser()
     args = parser.parse_args()
     
