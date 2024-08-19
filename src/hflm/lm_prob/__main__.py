@@ -7,9 +7,9 @@ from transformers.utils import logging as hf_logging
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", "-m", type=str, help="")
-    parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--string", "-s", type=str, help="string to calculate log probs of")
+    parser.add_argument("--model", "-m", type=str, help="string: hugging face model path")
+    parser.add_argument("--device", type=str, default="cuda:0", help="string: where to run the model")
+    parser.add_argument("--string", "-s", type=str, help="string: used to calculate log probs")
     return parser
 
 def lm_prob():
