@@ -7,11 +7,11 @@ from transformers.utils import logging as hf_logging
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", "-m", type=str, help="")
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--string", "-s", type=str, help="string to calculate log probs of")
-    parser.add_argument("--max_new_tokens", type=int, default=16, help="max number of tokens to generate")
-    parser.add_argument("--temperature", "-t", type=float, default=0.0, help="the sampling temperature")
+    parser.add_argument("--model", "-m", type=str, help="string: hugging face model path")
+    parser.add_argument("--device", type=str, default="cuda", help="string: where to run the model")
+    parser.add_argument("--string", "-s", type=str, help="string: context string to generate text from")
+    parser.add_argument("--max_new_tokens", type=int, default=16, help="int: max number of tokens to generate")
+    parser.add_argument("--temperature", "-t", type=float, default=0.0, help="float: the sampling temperature")
     
     return parser
 
@@ -24,7 +24,7 @@ def lm_gen():
         logging.error("Model name required.")
         sys.exit(1)
 
-    if args.string is None:
+    if args.string is None or args.string == "":
         logging.error("String required.")
         sys.exit(1)
 
