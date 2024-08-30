@@ -345,7 +345,7 @@ class HFLM(LM):
                 model_name = model
             else:
                 model_name = model.name_or_path
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code)
         return None
 
     def _create_model(
