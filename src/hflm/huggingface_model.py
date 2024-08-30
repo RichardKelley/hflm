@@ -151,7 +151,8 @@ class HFLM(LM):
         # create tokenizer
         self._create_tokenizer(
             model,
-            tokenizer
+            tokenizer,
+            **kwargs
         )
 
         # create model
@@ -327,12 +328,14 @@ class HFLM(LM):
                     str,
                     PreTrainedTokenizer
                 ]
-            ]
+            ],
+            trust_remote_code: Optional[bool] = False
     ) -> None:
         if tokenizer is not None:
             if isinstance(tokenizer, str):
                 self.tokenizer = AutoTokenizer.from_pretrained(
-                    tokenizer
+                    tokenizer,
+                    trust_remote_code=trust_remote_code
                 )
             else:
                 assert isinstance(tokenizer, PreTrainedTokenizer)
