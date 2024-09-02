@@ -148,11 +148,15 @@ class HFLM(LM):
         # get backend
         self._get_backend()
 
+        trust_remote_code = False
+        if "trust_remote_code" in kwargs:
+            trust_remote_code = kwargs["trust_remote_code"]
+
         # create tokenizer
         self._create_tokenizer(
             model,
             tokenizer,
-            **kwargs
+            trust_remote_code
         )
 
         # create model
