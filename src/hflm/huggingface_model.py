@@ -443,6 +443,7 @@ class HFLM(LM):
     
     def _detect_batch_size(self, requests=None, pos: int = 0):
         if requests:
+            requests.sort(key=lambda x: sum(len(s) for s in x), reverse=True)
             context_enc, continuation_enc = requests[pos]
             max_length = len(
                 (context_enc + continuation_enc)[-(self.max_length + 1) : ][:-1]
