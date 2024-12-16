@@ -564,7 +564,7 @@ class HFLM(LM):
 
             new_reqs.append(((context, continuation), context_enc, continuation_enc))
 
-        return self._loglikelihood_tokens(new_reqs, override_bs=adaptive_batch_size)
+        return self._loglikelihood_tokens(new_reqs, disable_tqdm=disable_tqdm, override_bs=adaptive_batch_size)
 
     def _model_call(self, inps, attn_mask=None, labels=None):
         with torch.no_grad():
