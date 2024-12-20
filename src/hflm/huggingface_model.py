@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 
 import transformers
-from transformers import PreTrainedModel, PreTrainedTokenizer, AutoTokenizer
+from transformers import PreTrainedModel, PreTrainedTokenizer, AutoTokenizer, BitsAndBytesConfig
 
 from accelerate import (
     Accelerator,
@@ -368,6 +368,29 @@ class HFLM(LM):
         
         model_kwargs = kwargs if kwargs else {}
 
+        # Handle quantization config
+        quantization_config = None
+        if model_kwargs.get("load_in_4bit") or model_kwargs.get("load_in_8bit"):
+            bnb_config_args = {}
+            
+            if model_kwargs.get("load_in_4bit"):
+                bnb_config_args["load_in_4bit"] = model_kwargs.pop("load_in_4bit")
+                # Handle 4-bit compute dtype if specified
+                if model_kwargs.get("bnb_4bit_compute_dtype"):
+                    bnb_config_args["bnb_4bit_compute_dtype"] = get_dtype(
+                        model_kwargs.pop("bnb_4bit_compute_dtype")
+                    )
+                # Handle other 4-bit specific args if present
+                if model_kwargs.get("bnb_4bit_quant_type"):
+                    bnb_config_args["bnb_4bit_quant_type"] = model_kwargs.pop("bnb_4bit_quant_type")
+                if model_kwargs.get("bnb_4bit_use_double_quant"):
+                    bnb_config_args["bnb_4bit_use_double_quant"] = model_kwargs.pop("bnb_4bit_use_double_quant")
+            
+            if model_kwargs.get("load_in_8bit"):
+                bnb_config_args["load_in_8bit"] = model_kwargs.pop("load_in_8bit")
+                
+            quantization_config = BitsAndBytesConfig(**bnb_config_args)
+
         model_kwargs.update(
             self._get_accelerate_args(
                 parallelize,
@@ -384,21 +407,11 @@ class HFLM(LM):
             else:
                 model_kwargs.update({"device_map": {"": str(self.device)}})
 
-        if model_kwargs.get("load_in_4bit", None):
-            assert (
-                transformers.__version__ >= "4.30.0"
-            ), "load_in_4bit requires transformers >= 4.30.0"
-        if transformers.__version__ >= "4.30.0":
-            if model_kwargs.get("load_in_4bit", None):
-                if model_kwargs.get("bnb_4bit_compute_dtype", None):
-                    model_kwargs["bnb_4bit_compute_dtype"] = get_dtype(
-                        model_kwargs["bnb_4bit_compute_dtype"]
-                    )
-
         self._model = self.AUTO_MODEL_CLASS.from_pretrained(
             model,
             torch_dtype=get_dtype(dtype),
             trust_remote_code=trust_remote_code,
+            quantization_config=quantization_config,
             **model_kwargs
         )
 
